@@ -7,26 +7,25 @@
 #include <sys/select.h>
 #include <netinet/in.h>
 
-typedef struct		s_client 
+typedef struct s_client
 {
-	int				fd;
-    int             id;
-	struct s_client	*next;
-}	t_client;
+    int fd;
+    int id;
+    struct s_client *next;
+} t_client;
 
 t_client *g_clients = NULL;
 
-int serv_sock, g_id = 0;
-fd_set reads; //감시할 소켓 목록
-fd_set cpy_read, cpy_write;
+int sock_fd, g_id = 0;
+fd_set curr_sock, cpy_read, cpy_write;
 char msg[42];
-char str[42*4096], tmp[42*4096], buf[42*4096 + 42];
+char str[42 * 4096], tmp[42 * 4096], buf[42 * 4096 + 42];
 
-void	fatal() 
+void fatal()
 {
-	write(2, "Fatal error\n", strlen("Fatal error\n"));
-	close(serv_sock);
-	exit(1);
+    write(2, "Fatal error\n", strlen("Fatal error\n"));
+    close(sock_fd);
+    exit(1);
 }
 
 int get_id(int fd)
@@ -42,9 +41,9 @@ int get_id(int fd)
     return (-1);
 }
 
-int		get_max_fd() 
+int get_max_fd()
 {
-	int	max = serv_sock;
+    int max = sock_fd;
     t_client *temp = g_clients;
 
     while (temp)
@@ -56,7 +55,7 @@ int		get_max_fd()
     return (max);
 }
 
-void	send_all(int fd, char *str_req)
+void send_all(int fd, char *str_req)
 {
     t_client *temp = g_clients;
 
@@ -71,7 +70,7 @@ void	send_all(int fd, char *str_req)
     }
 }
 
-int		add_client_to_list(int fd)
+int add_client_to_list(int fd)
 {
     t_client *temp = g_clients;
     t_client *new;
@@ -100,11 +99,11 @@ void add_client()
     socklen_t len = sizeof(clientaddr);
     int client_fd;
 
-    if ((client_fd = agcept(serv_sock, (struct sockaddr *)&clientaddr, &len)) < 0)
+    if ((client_fd = accept(sock_fd, (struct sockaddr *)&clientaddr, &len)) < 0)
         fatal();
     sprintf(msg, "server: client %d just arrived\n", add_client_to_list(client_fd));
     send_all(client_fd, msg);
-    FD_SET(client_fd, &reads);
+    FD_SET(client_fd, &curr_sock);
 }
 
 int rm_client(int fd)
@@ -120,7 +119,7 @@ int rm_client(int fd)
     }
     else
     {
-        while(temp && temp->next && temp->next->fd != fd)
+        while (temp && temp->next && temp->next->fd != fd)
             temp = temp->next;
         del = temp->next;
         temp->next = temp->next->next;
@@ -151,46 +150,43 @@ void ex_msg(int fd)
     bzero(&str, strlen(str));
 }
 
-int main(int ag, char **av)
+int main(int ac, char **av)
 {
-    if (ag != 2) {
+    if (ac != 2)
+    {
         write(2, "Wrong number of arguments\n", strlen("Wrong number of arguments\n"));
         exit(1);
     }
-    struct sockaddr_in serv_addr;
-    //서버 소켓 만듦
-    if ((serv_sock = socket(AF_INET, SOCK_STREAM, 0)) == -1)
-        fatal();
-    //서버 소켓 설정
-    uint16_t port = atoi(av[1]);
-    bzero(&serv_addr, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET; 
-	serv_addr.sin_addr.s_addr = htonl(2130706433); //127.0.0.1
-	serv_addr.sin_port = htons(atoi(av[1]));
-    //서버 소켓 바인딩
-    if (bind(serv_sock, (const struct sockaddr *)&serv_addr, sizeof(serv_addr)) == -1)
-        fatal();
-    //요청 대기 시작
-    if (listen(serv_sock, 0) == -1)
-        fatal();
-    
-    FD_ZERO(&reads); // reads를 0으로 초기화
-    FD_SET(serv_sock, &reads);//서버용 소켓을 감시 대상으로 등록
 
+    struct sockaddr_in servaddr;
+    uint16_t port = atoi(av[1]);
+    bzero(&servaddr, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = htonl(2130706433); // 127.0.0.1
+    servaddr.sin_port = htons(port);
+
+    if ((sock_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+        fatal();
+    if (bind(sock_fd, (const struct sockaddr *)&servaddr, sizeof(servaddr)) < 0)
+        fatal();
+    if (listen(sock_fd, 100) < 0)
+        fatal();
+
+    FD_ZERO(&curr_sock);
+    FD_SET(sock_fd, &curr_sock);
     bzero(&tmp, sizeof(tmp));
     bzero(&buf, sizeof(buf));
     bzero(&str, sizeof(str));
-
-    while(true)
+    while (1)
     {
-        cpy_write = cpy_read = reads;
-        if (select(get_max_fd() + 1, &cpy_read, &cpy_write, NULL, NULL) == -1) //실패시 재시도
+        cpy_write = cpy_read = curr_sock;
+        if (select(get_max_fd() + 1, &cpy_read, &cpy_write, NULL, NULL) < 0)
             continue;
         for (int fd = 0; fd <= get_max_fd(); fd++)
         {
             if (FD_ISSET(fd, &cpy_read))
             {
-                if (fd == serv_sock)
+                if (fd == sock_fd)
                 {
                     bzero(&msg, sizeof(msg));
                     add_client();
@@ -198,19 +194,19 @@ int main(int ag, char **av)
                 }
                 else
                 {
-			int ret_recv = 1000;
-			while (ret_recv == 1000 || str[strlen(str) - 1] != '\n')
-			{
-				ret_recv = recv(fd, str + strlen(str), 1000, 0);
-				if (ret_recv <= 0)
-					break ;
-			}
+                    int ret_recv = 1000;
+                    while (ret_recv == 1000 || str[strlen(str) - 1] != '\n')
+                    {
+                        ret_recv = recv(fd, str + strlen(str), 1000, 0);
+                        if (ret_recv <= 0)
+                            break;
+                    }
                     if (ret_recv <= 0)
                     {
                         bzero(&msg, sizeof(msg));
                         sprintf(msg, "server: client %d just left\n", rm_client(fd));
                         send_all(fd, msg);
-                        FD_CLR(fd, &reads);
+                        FD_CLR(fd, &curr_sock);
                         close(fd);
                         break;
                     }
@@ -220,9 +216,7 @@ int main(int ag, char **av)
                     }
                 }
             }
-            
         }
-        
     }
     return (0);
 }
